@@ -1,0 +1,4 @@
+export const STUDY_TOKEN_ADDRESS = "0xA3A338C83201338678a2e7aDC818F4e9774f181D";
+export const COURSE_MARKETPLACE_ADDRESS = "0x0B2A3dcC3fDd53966A1968Fda8BBD3f5570eEd0e";
+
+// после деплоя обновить адреса контрактов

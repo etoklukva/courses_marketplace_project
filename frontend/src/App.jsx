@@ -2,6 +2,11 @@ import { useEffect, useState } from "react";
 import { getBlockchain, formatToken, parseToken } from "./utils/blockchain";
 import { COURSE_MARKETPLACE_ADDRESS } from "./config/contracts";
 import "./index.css";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import { ethers } from "ethers";
 
 function App() {
   const [userAddress, setUserAddress] = useState("");
@@ -30,6 +35,17 @@ function App() {
   const [toggleCourseId, setToggleCourseId] = useState("");
   const [toggleActive, setToggleActive] = useState("true");
 
+  const [blockCourseId, setBlockCourseId] = useState("");
+  const [blockTitle, setBlockTitle] = useState("");
+  const [blockContent, setBlockContent] = useState("");
+
+  const [courseBlocks, setCourseBlocks] = useState({});
+  const [selectedBlocks, setSelectedBlocks] = useState({});
+
+  const [deleteCourseId, setDeleteCourseId] = useState("");
+  const [deleteBlockCourseId, setDeleteBlockCourseId] = useState("");
+  const [deleteBlockId, setDeleteBlockId] = useState("");
+
   async function connectWallet() {
     try {
       setStatus("Подключение MetaMask...");
@@ -47,6 +63,7 @@ function App() {
       setBalance(formatToken(rawBalance));
 
       await loadCourses(blockchain.marketplaceContract, blockchain.userAddress);
+      await loadCourseBlocks(blockchain.marketplaceContract, blockchain.userAddress);
 
       setStatus("Кошелёк подключён");
     } catch (error) {
@@ -64,6 +81,10 @@ function App() {
       for (let i = 0; i < Number(total); i++) {
         const course = await contract.courses(i);
         const access = await contract.checkAccess(address, i);
+
+        if (!course.exists || course.deleted) {
+          continue;
+        }
 
         list.push({
           id: Number(course.id),
@@ -94,6 +115,7 @@ function App() {
       setIsOwner(owner.toLowerCase() === userAddress.toLowerCase());
 
       await loadCourses(marketplaceContract, userAddress);
+      await loadCourseBlocks(marketplaceContract, userAddress);
 
       setStatus("Данные обновлены");
     } catch (error) {
@@ -241,6 +263,164 @@ function App() {
     }
   }
 
+  async function addCourseBlock() {
+    try {
+      if (!marketplaceContract) return;
+      setStatus("Сохранение блока курса...");
+
+      const currentBlockCount = await marketplaceContract.courseBlockCount(Number(blockCourseId));
+      const blockId = Number(currentBlockCount);
+
+      const response = await fetch("http://localhost:4000/api/course-blocks", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          courseId: Number(blockCourseId),
+          blockId,
+          title: blockTitle,
+          content: blockContent
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Backend error");
+      }
+
+      const tx = await marketplaceContract.addCourseBlock(
+        Number(blockCourseId),
+        blockTitle,
+        data.contentHash
+      );
+      await tx.wait();
+
+      setBlockCourseId("");
+      setBlockTitle("");
+      setBlockContent("");
+
+      await refreshData();
+      setStatus("Блок курса добавлен");
+    } catch (error) {
+      setStatus(error.reason || error.message);
+    }
+  }
+
+  async function loadCourseBlocks(contract = marketplaceContract, address = userAddress) {
+    try {
+      if (!contract || !address) return;
+
+      const totalCourses = await contract.nextCourseId();
+      const blocksMap = {};
+
+      for (let i = 0; i < Number(totalCourses); i++) {
+        const access = await contract.checkAccess(address, i);
+        const blockCount = await contract.courseBlockCount(i);
+
+        blocksMap[i] = [];
+
+        if (access || isOwner) {
+          for (let j = 0; j < Number(blockCount); j++) {
+             const blockData = await contract.getCourseBlock(i, j);
+            if (blockData[3]) {
+              continue;
+            }
+            blocksMap[i].push({
+              id: Number(blockData[0]),
+              title: blockData[1],
+              contentHash: blockData[2]
+            });
+          }
+        }
+      }
+
+      setCourseBlocks(blocksMap);
+    } catch (error) {
+      setStatus(error.reason || error.message);
+    }
+  }
+
+  async function deleteCourseHandler() {
+    try {
+      if (!marketplaceContract) return;
+      setStatus("Удаление курса...");
+
+      const tx = await marketplaceContract.deleteCourse(Number(deleteCourseId));
+      await tx.wait();
+
+      setDeleteCourseId("");
+      await refreshData();
+      setStatus("Курс удалён");
+    } catch (error) {
+      setStatus(error.reason || error.message);
+    }
+  }
+
+  async function deleteCourseBlockHandler() {
+    try {
+      if (!marketplaceContract) return;
+      setStatus("Удаление блока курса...");
+
+      const tx = await marketplaceContract.deleteCourseBlock(
+        Number(deleteBlockCourseId),
+        Number(deleteBlockId)
+      );
+      await tx.wait();
+
+      setDeleteBlockCourseId("");
+      setDeleteBlockId("");
+
+      await refreshData();
+      setStatus("Блок курса удалён");
+    } catch (error) {
+      setStatus(error.reason || error.message);
+    }
+  }
+
+  async function openBlock(course, block) {
+    try {
+      if (!course.active) {
+        setStatus("Курс неактивен. Доступ к главам временно закрыт.");
+        return;
+      }
+
+      setStatus("Загрузка главы...");
+
+      const response = await fetch(
+        `http://localhost:4000/api/course-blocks/${course.id}/${block.id}`
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Ошибка загрузки блока");
+      }
+
+      const calculatedHash = ethers.keccak256(
+        ethers.toUtf8Bytes(data.content)
+      );
+
+      if (calculatedHash.toLowerCase() !== block.contentHash.toLowerCase()) {
+        throw new Error("Нарушена целостность данных");
+      }
+
+      setSelectedBlocks((prev) => ({
+        ...prev,
+        [course.id]: {
+          id: block.id,
+          title: block.title,
+          content: data.content
+        }
+      }));
+
+      setStatus("Глава загружена");
+    } catch (error) {
+      setStatus(error.message);
+    }
+  }
+
   useEffect(() => {
     if (window.ethereum) {
       window.ethereum.on("accountsChanged", () => {
@@ -272,7 +452,7 @@ function App() {
         {isOwner && (
           <>
             <div className="card">
-              <h2>Создать курс</h2>
+              <h2>Создать Курс</h2>
               <input
                 type="text"
                 placeholder="Название курса"
@@ -361,13 +541,64 @@ function App() {
               </select>
               <button onClick={updateStatusHandler}>Обновить статус</button>
             </div>
+
+            <div className="card">
+              <h2>Удалить Курс</h2>
+              <input
+                type="number"
+                placeholder="ID Курса"
+                value={deleteCourseId}
+                onChange={(e) => setDeleteCourseId(e.target.value)}
+              />
+              <button onClick={deleteCourseHandler}>Удалить</button>
+            </div>
+
+            <div className="card">
+              <h2>Добавить блок курса</h2>
+              <input
+                type="number"
+                placeholder="ID Курса"
+                value={blockCourseId}
+                onChange={(e) => setBlockCourseId(e.target.value)}
+              />
+              <input
+                type="text"
+                placeholder="Тема блока"
+                value={blockTitle}
+                onChange={(e) => setBlockTitle(e.target.value)}
+              />
+              <textarea
+                placeholder="Содержимое блока. Можно вставлять обычный текст, Markdown, LaTeX-формулы как текст, ссылки на изображения."
+                value={blockContent}
+                onChange={(e) => setBlockContent(e.target.value)}
+                style={{ minHeight: "220px" }}
+              />
+              <button onClick={addCourseBlock}>Добавить блок курса</button>
+            </div>
+
+            <div className="card">
+              <h2>Удалить блок Курса</h2>
+              <input
+                type="number"
+                placeholder="ID Курса"
+                value={deleteBlockCourseId}
+                onChange={(e) => setDeleteBlockCourseId(e.target.value)}
+              />
+              <input
+                type="number"
+                placeholder="ID Блока"
+                value={deleteBlockId}
+                onChange={(e) => setDeleteBlockId(e.target.value)}
+              />
+              <button onClick={deleteCourseBlockHandler}>Удалить</button>
+            </div>
           </>
         )}
 
         <div className="card">
           <h2>Курсы</h2>
 
-          {courses.length === 0 && <p>Курсов пока нет</p>}
+          {courses.length === 0 && <p>Здесь пока что пусто</p>}
 
           {courses.map((course) => (
             <div key={course.id} className="course">
@@ -380,8 +611,55 @@ function App() {
 
               {!isOwner && (
                 <div className="actions">
-                  <button onClick={() => approveCourse(course)}>Разрешить списание</button>
-                  <button onClick={() => buyCourse(course.id)}>Купить</button>
+                  {!course.access && (
+                    <>
+                      <button onClick={() => approveCourse(course)}>Разрешить списание</button>
+                      <button onClick={() => buyCourse(course.id)}>Купить</button>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {course.access && courseBlocks[course.id] && courseBlocks[course.id].length > 0 && (
+                <div style={{ marginTop: "16px" }}>
+                  <p><strong>Блоки курса:</strong></p>
+                  <div className="actions" style={{ flexWrap: "wrap" }}>
+                    {courseBlocks[course.id].map((block) => (
+                      <button
+                        key={block.id}
+                        onClick={() => openBlock(course, block)}
+                        disabled={!course.active}
+                        style={{
+                          opacity: course.active ? 1 : 0.5,
+                          cursor: course.active ? "pointer" : "not-allowed"
+                        }}
+                      >
+                        {block.title}
+                      </button>
+                    ))}
+                  </div>
+                  {selectedBlocks[course.id] && course.active && (
+                    <div
+                      style={{
+                        marginTop: "16px",
+                        padding: "16px",
+                        border: "1px solid #dbe1ea",
+                        borderRadius: "12px",
+                        background: "#f9fbff",
+                        whiteSpace: "pre-wrap"
+                      }}
+                    >
+                      <h3>{selectedBlocks[course.id].title}</h3>
+                      <div className="markdown-content">
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm, remarkMath]}
+                          rehypePlugins={[rehypeKatex]}
+                        >
+                          {selectedBlocks[course.id].content}
+                        </ReactMarkdown>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
